@@ -1,0 +1,225 @@
+{	"AWSTemplateFormatVersion": "2010-09-09",
+
+	"Description": "CloudFormation template to launch a highly available ArcGIS Server stack in Amazon VPC",
+
+	"Parameters" : {
+		"AMI" : {
+			"Description" : "Your ArcGIS Server AMI ID.",
+			"Type" : "String"
+		},
+		"VpcId" : {
+			"Type" : "String",
+			"Description" : "VpcId of your existing Virtual Private Cloud (VPC).",
+			"Default" : "vpc-4adfc123"
+		},
+		"Subnets" : {
+			"Type" : "CommaDelimitedList",
+			"Default" : "subnet-8ec5b8e6,subnet-1edcc277",
+			"Description" : "The list of SubnetIds where the stack will be launched"
+		},
+	    "AZs" : {
+		"Type" : "CommaDelimitedList",
+		"Default" : "us-west-2b,us-west-2c",
+		"Description" : "The list of AvailabilityZones for your Virtual Private Cloud (VPC). It needs to be consistent with the AZ of your subnets."
+		},
+		"InstanceType" : {
+			"Description" : "Type of EC2 instance to launch.",
+			"Type" : "String",
+			"Default" : "m1.medium",
+			"AllowedValues" : [ "m1.medium","m1.large","m1.xlarge","m2.xlarge","m2.2xlarge","m2.4xlarge","m3.xlarge","m3.2xlarge","c1.xlarge","cc2.8xlarge","cg1.4xlarge", "cr1.8xlarge","hi1.4xlarge","hs1.8xlarge"],
+			"ConstraintDescription" : "must be a valid EC2 instance type."
+		},
+		"KeyName" : {
+			"Description" : "The EC2 Key Pair to allow Remote Desktop access or SSH to the instances.",
+			"Type" : "String",
+			"Default" : "Your_KeyPair_Name"
+		},
+		"MinSize" : {
+			"Description" : "Minimum number of EC2 instances.",
+			"Type" : "Number",
+			"Default" : "2"
+		},
+		"MaxSize" : {
+			"Description" : "Maximum number of EC2 instances.",
+			"Type" : "Number",
+			"Default" : "4"
+		}
+	},
+
+	"Resources": {
+
+		"LoadBalancerSecurityGroup": {
+			"Type": "AWS::EC2::SecurityGroup",
+			"Properties": {
+				"GroupDescription": "Enable HTTP access on port 80 and 443.",
+				"VpcId" : { "Ref" : "VpcId" },
+				"SecurityGroupIngress": [{
+				                        	 "IpProtocol": "tcp",
+				                        	 "FromPort": "80" ,
+				                        	 "ToPort": "80" ,
+				                        	 "CidrIp" : "0.0.0.0/0"
+											 },{
+ 				                        	 "IpProtocol": "tcp",
+				                        	 "FromPort": "443" ,
+				                        	 "ToPort": "443" ,
+                                             "CidrIp" : "0.0.0.0/0"
+				                         }],
+		        "SecurityGroupEgress" : [{
+											 "IpProtocol" : "tcp",
+											 "FromPort" : "6080",
+											 "ToPort" : "6080",
+											 "CidrIp" : "0.0.0.0/0"
+											 },{
+				                        	 "IpProtocol": "tcp",
+				                        	 "FromPort": "6443" ,
+				                        	 "ToPort": "6443" ,
+				                        	 "CidrIp" : "0.0.0.0/0"
+				                         }]
+						  }
+			},
+		"ELB" : {
+			"Type" : "AWS::ElasticLoadBalancing::LoadBalancer",
+			"Properties" : {
+				"Subnets" : { "Ref" : "Subnets" },
+				"SecurityGroups" : [ { "Ref" : "LoadBalancerSecurityGroup" } ],
+				"Listeners" : [ {
+					"LoadBalancerPort" : "80",
+					"InstancePort" : "6080" ,
+					"Protocol" : "HTTP"
+				}],
+				"HealthCheck" : {
+					"Target" : "HTTP:6080/arcgis/rest/info/healthcheck",
+					"HealthyThreshold" : "3",
+					"UnhealthyThreshold" : "5",
+					"Interval" : "30",
+					"Timeout" : "5"
+				}
+			}
+		},
+
+		"InstanceSecurityGroup": {
+			"Type": "AWS::EC2::SecurityGroup",
+			"Properties": {
+				"GroupDescription": "Enable HTTP access on 6080 and 6443 from ELB.",
+				"VpcId" : { "Ref" : "VpcId" },
+				"SecurityGroupIngress": [{
+				                        	 "IpProtocol": "tcp",
+				                        	 "FromPort": "6080" ,
+				                        	 "ToPort": "6080" ,
+											 "SourceSecurityGroupId": { "Ref" : "LoadBalancerSecurityGroup" }
+				                         },{
+				                        	 "IpProtocol": "tcp",
+				                        	 "FromPort": "6443" ,
+				                        	 "ToPort": "6443" ,
+				                        	 "SourceSecurityGroupId": { "Ref" : "LoadBalancerSecurityGroup" }
+				                         }]
+			}
+		},
+
+		"LaunchConfig": {
+			"Type": "AWS::AutoScaling::LaunchConfiguration",
+			"Properties": {
+				"ImageId": {"Ref" : "AMI"},
+				"InstanceType": {"Ref": "InstanceType"},
+				"KeyName": {"Ref": "KeyName"},
+				"SecurityGroups": [{"Ref": "InstanceSecurityGroup"}],
+				"InstanceMonitoring": true
+			}
+		},
+
+		"AutoScalingGroup": {
+			"UpdatePolicy" : {
+				"AutoScalingRollingUpdate" : {
+					"MinInstancesInService" : {"Ref" : "MinSize"},
+					"MaxBatchSize" : "3",
+					"PauseTime" : "PT15M"
+				}
+			},
+			"Type": "AWS::AutoScaling::AutoScalingGroup",
+			"Properties": {
+				"AvailabilityZones" : { "Ref" : "AZs" },
+				"VPCZoneIdentifier" : { "Ref" : "Subnets" },
+				"Cooldown": "300",
+				"MaxSize": {"Ref" : "MaxSize"},
+				"MinSize": {"Ref" : "MinSize"},
+				"LaunchConfigurationName": {"Ref": "LaunchConfig"},
+                "HealthCheckType" : "EC2",
+                "HealthCheckGracePeriod" : "3600",
+				"LoadBalancerNames": [{"Ref": "ELB"}],
+				"Tags": [{"Key": "Name", "Value": {"Ref": "AWS::StackName"}, "PropagateAtLaunch" : true}]
+			}
+		},
+
+		"ScaleUpPolicy" : {
+			"Type" : "AWS::AutoScaling::ScalingPolicy",
+			"Properties" : {
+				"AdjustmentType" : "ChangeInCapacity",
+				"AutoScalingGroupName" : { "Ref" : "AutoScalingGroup" },
+				"Cooldown" : "60",
+				"ScalingAdjustment" : "1"
+			}
+		},
+
+		"ScaleDownPolicy" : {
+			"Type" : "AWS::AutoScaling::ScalingPolicy",
+			"Properties" : {
+				"AdjustmentType" : "ChangeInCapacity",
+				"AutoScalingGroupName" : { "Ref" : "AutoScalingGroup" },
+				"Cooldown" : "60",
+				"ScalingAdjustment" : "-1"
+			}
+		},
+
+		"CPUAlarmHigh": {
+			"Type": "AWS::CloudWatch::Alarm",
+			"Properties": {
+				"AlarmDescription": "Scale-up if CPU > 80% for 10 minutes",
+				"MetricName": "CPUUtilization",
+				"Namespace": "AWS/EC2",
+				"Statistic": "Average",
+				"Period": "300",
+				"EvaluationPeriods": "2",
+				"Threshold": "80",
+				"AlarmActions": [ { "Ref": "ScaleUpPolicy" } ],
+				"Dimensions": [
+				               {
+				            	   "Name": "AutoScalingGroupName",
+				            	   "Value": { "Ref": "AutoScalingGroup" }
+				               }
+				               ],
+				               "ComparisonOperator": "GreaterThanThreshold"
+			}
+		},
+
+		"CPUAlarmLow": {
+			"Type": "AWS::CloudWatch::Alarm",
+			"Properties": {
+				"AlarmDescription": "Scale-down if CPU < 20% for 10 minutes",
+				"MetricName": "CPUUtilization",
+				"Namespace": "AWS/EC2",
+				"Statistic": "Average",
+				"Period": "300",
+				"EvaluationPeriods": "2",
+				"Threshold": "20",
+				"AlarmActions": [ { "Ref": "ScaleDownPolicy" } ],
+				"Dimensions": [
+				               {
+				            	   "Name": "AutoScalingGroupName",
+				            	   "Value": { "Ref": "AutoScalingGroup" }
+				               }
+				               ],
+				               "ComparisonOperator": "LessThanThreshold"
+			}
+		}
+	},
+
+	"Outputs": {
+		"RestURL": {
+			"Value": {
+				"Fn::Join": ["", ["http://", {"Fn::GetAtt": ["ELB", "DNSName" ]}, "/arcgis/rest"]]
+			},
+			"Description" : "ArcGIS Server REST Services Directory URL"
+		}
+	}
+
+}
